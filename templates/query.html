@@ -1,0 +1,358 @@
+{% extends "layout.html" %}
+
+{% block title %}Query Documents - Advanced RAG Application{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h1 class="mb-4">Query Documents</h1>
+    
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card shadow-sm">
+                <div class="card-header">
+                    <h5 class="mb-0">Ask a Question</h5>
+                </div>
+                <div class="card-body">
+                    <form id="queryForm">
+                        <div class="mb-3">
+                            <label for="documentSelect" class="form-label">Select Document</label>
+                            <select class="form-select" id="documentSelect">
+                                <option value="">All Documents</option>
+                                {% for doc in documents %}
+                                <option value="{{ doc.id }}">{{ doc.title or doc.filename }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text text-muted">Leave blank to search across all documents</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="query" class="form-label">Your Question</label>
+                            <textarea class="form-control" id="query" rows="3" placeholder="What would you like to know about the document?" required></textarea>
+                        </div>
+                        
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="topK" class="form-label">Number of chunks (top-k)</label>
+                                <input type="number" class="form-control" id="topK" value="5" min="1" max="20">
+                                <div class="form-text text-muted">More chunks may improve accuracy but increase processing time</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="temperature" class="form-label">Response Temperature</label>
+                                <input type="range" class="form-range" id="temperature" min="0" max="1" step="0.1" value="0.7">
+                                <div class="d-flex justify-content-between">
+                                    <span class="form-text text-muted">Precise</span>
+                                    <span class="form-text text-muted"><span id="temperatureValue">0.7</span></span>
+                                    <span class="form-text text-muted">Creative</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary" id="submitQuery">Get Answer</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            
+            <!-- Response Section -->
+            <div class="card shadow-sm mt-4" id="responseCard" style="display: none;">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Answer</h5>
+                    <button class="btn btn-sm btn-outline-secondary" id="copyResponse" title="Copy to clipboard">
+                        <i class="bi bi-clipboard"></i> Copy
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div id="loadingResponse" style="display: none;">
+                        <div class="d-flex justify-content-center align-items-center p-5">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span class="ms-3">Generating response...</span>
+                        </div>
+                    </div>
+                    <div id="responseContainer">
+                        <p class="lead">Ask a question to get started.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-4">
+            <!-- Source Chunks -->
+            <div class="card shadow-sm" id="sourcesCard" style="display: none;">
+                <div class="card-header">
+                    <h5 class="mb-0">Source Chunks</h5>
+                </div>
+                <div class="card-body">
+                    <div id="loadingSources" style="display: none;">
+                        <div class="d-flex justify-content-center align-items-center p-3">
+                            <div class="spinner-border spinner-border-sm text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span class="ms-2">Loading sources...</span>
+                        </div>
+                    </div>
+                    <div id="sourcesContainer"></div>
+                </div>
+            </div>
+            
+            <!-- Tips Card -->
+            <div class="card shadow-sm mt-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Tips for Better Questions</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="mb-0">
+                        <li class="mb-2">Be specific in your questions</li>
+                        <li class="mb-2">Include key terms that might appear in the document</li>
+                        <li class="mb-2">For summarization, ask "What are the main points about X?"</li>
+                        <li class="mb-2">For comparisons, use "How does X compare to Y?"</li>
+                        <li>Adjust the number of chunks for better context</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Query History -->
+            <div class="card shadow-sm mt-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Recent Queries</h5>
+                </div>
+                <div class="card-body">
+                    <div id="queryHistory">
+                        <div class="d-flex justify-content-center align-items-center p-3">
+                            <div class="spinner-border spinner-border-sm text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span class="ms-2">Loading query history...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const queryForm = document.getElementById('queryForm');
+        const temperatureSlider = document.getElementById('temperature');
+        const temperatureValue = document.getElementById('temperatureValue');
+        const responseCard = document.getElementById('responseCard');
+        const sourcesCard = document.getElementById('sourcesCard');
+        const responseContainer = document.getElementById('responseContainer');
+        const sourcesContainer = document.getElementById('sourcesContainer');
+        const loadingResponse = document.getElementById('loadingResponse');
+        const loadingSources = document.getElementById('loadingSources');
+        const copyResponseBtn = document.getElementById('copyResponse');
+        const queryHistoryContainer = document.getElementById('queryHistory');
+        
+        // Update temperature value display
+        temperatureSlider.addEventListener('input', function() {
+            temperatureValue.textContent = this.value;
+        });
+        
+        // Handle form submission
+        queryForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const query = document.getElementById('query').value;
+            const docId = document.getElementById('documentSelect').value;
+            const topK = document.getElementById('topK').value;
+            const temperature = document.getElementById('temperature').value;
+            
+            if (!query) {
+                alert('Please enter a question');
+                return;
+            }
+            
+            // Show response and sources cards
+            responseCard.style.display = 'block';
+            sourcesCard.style.display = 'block';
+            
+            // Show loading indicators
+            loadingResponse.style.display = 'block';
+            loadingSources.style.display = 'block';
+            responseContainer.innerHTML = '';
+            sourcesContainer.innerHTML = '';
+            
+            // Send query to server
+            fetch('/query/ask', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    query: query,
+                    doc_id: docId,
+                    top_k: parseInt(topK),
+                    temperature: parseFloat(temperature)
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Hide loading indicators
+                loadingResponse.style.display = 'none';
+                loadingSources.style.display = 'none';
+                
+                if (data.error) {
+                    responseContainer.innerHTML = `
+                        <div class="alert alert-danger">
+                            Error: ${data.error}
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Display response
+                if (data.response) {
+                    const formattedResponse = formatResponse(data.response.text);
+                    responseContainer.innerHTML = `
+                        <div class="response-text">
+                            ${formattedResponse}
+                        </div>
+                    `;
+                }
+                
+                // Display source chunks
+                if (data.chunks && data.chunks.length > 0) {
+                    let sourcesHtml = '';
+                    
+                    data.chunks.forEach((chunk, index) => {
+                        const score = chunk.score ? (chunk.score * 100).toFixed(1) + '%' : 'N/A';
+                        const sourceText = chunk.text.length > 200 ? 
+                            chunk.text.substring(0, 200) + '...' : 
+                            chunk.text;
+                            
+                        sourcesHtml += `
+                            <div class="source-chunk mb-3">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <strong>Source ${index + 1}</strong>
+                                    <span class="badge bg-info">Relevance: ${score}</span>
+                                </div>
+                                <div class="source-text border p-2 rounded bg-dark-subtle" style="font-size: 0.85rem;">
+                                    ${sourceText}
+                                </div>
+                                ${chunk.document_id ? `<div class="text-muted small mt-1">Doc ID: ${chunk.document_id}</div>` : ''}
+                            </div>
+                        `;
+                    });
+                    
+                    sourcesContainer.innerHTML = sourcesHtml;
+                } else {
+                    sourcesContainer.innerHTML = `
+                        <div class="alert alert-warning">
+                            No source chunks found for this query.
+                        </div>
+                    `;
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                loadingResponse.style.display = 'none';
+                loadingSources.style.display = 'none';
+                
+                responseContainer.innerHTML = `
+                    <div class="alert alert-danger">
+                        An error occurred while processing your request. Please try again.
+                    </div>
+                `;
+            });
+        });
+        
+        // Copy response to clipboard
+        copyResponseBtn.addEventListener('click', function() {
+            const responseText = responseContainer.innerText;
+            navigator.clipboard.writeText(responseText).then(function() {
+                // Change button text temporarily
+                const originalText = copyResponseBtn.innerHTML;
+                copyResponseBtn.innerHTML = '<i class="bi bi-check"></i> Copied!';
+                setTimeout(() => {
+                    copyResponseBtn.innerHTML = originalText;
+                }, 2000);
+            }, function(err) {
+                console.error('Error copying text: ', err);
+                alert('Failed to copy text to clipboard');
+            });
+        });
+        
+        // Helper function to format response with Markdown-like syntax
+        function formatResponse(text) {
+            if (!text) return '';
+            
+            // Replace line breaks with <br>
+            let formatted = text.replace(/\n/g, '<br>');
+            
+            // Format citations [1], [2], etc.
+            formatted = formatted.replace(/\[(\d+)\]/g, '<sup class="citation">[$1]</sup>');
+            
+            return formatted;
+        }
+        
+        // Load query history
+        function loadQueryHistory() {
+            fetch('/query/history')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        queryHistoryContainer.innerHTML = `
+                            <div class="alert alert-warning">
+                                Error loading query history: ${data.error}
+                            </div>
+                        `;
+                        return;
+                    }
+                    
+                    if (!data.queries || data.queries.length === 0) {
+                        queryHistoryContainer.innerHTML = `
+                            <p class="text-muted">No queries yet. Ask a question to get started.</p>
+                        `;
+                        return;
+                    }
+                    
+                    let html = '';
+                    
+                    data.queries.forEach(query => {
+                        const timestamp = new Date(query.timestamp).toLocaleString();
+                        const documentInfo = query.document_id ? 
+                            `<span class="badge bg-secondary">Doc ID: ${query.document_id}</span>` : 
+                            '<span class="badge bg-secondary">All Documents</span>';
+                            
+                        html += `
+                            <div class="query-item mb-3 border-bottom pb-2">
+                                <div class="d-flex justify-content-between align-items-start mb-1">
+                                    <div>
+                                        <span class="fw-bold">${query.query_text}</span>
+                                    </div>
+                                    <div>
+                                        ${documentInfo}
+                                        <span class="badge bg-secondary ms-1">Top-k: ${query.top_k || 5}</span>
+                                    </div>
+                                </div>
+                                <div class="small text-muted mb-1">${timestamp}</div>
+                                <div class="small query-response text-truncate" style="max-width: 100%;">
+                                    ${query.response_text ? query.response_text.substring(0, 100) + '...' : 'No response'}
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    queryHistoryContainer.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    queryHistoryContainer.innerHTML = `
+                        <div class="alert alert-warning">
+                            Failed to load query history.
+                        </div>
+                    `;
+                });
+        }
+        
+        // Load query history on page load
+        loadQueryHistory();
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,84 @@
+{% extends "layout.html" %}
+
+{% block title %}Upload Document - Advanced RAG Application{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h1 class="mb-4">Upload Document</h1>
+    
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('document.upload') }}" enctype="multipart/form-data">
+                        <div class="mb-4">
+                            <label for="file" class="form-label">Select a PDF document to upload</label>
+                            <input type="file" class="form-control" id="file" name="file" accept=".pdf" required>
+                            <div class="form-text text-muted">Maximum file size: 35MB</div>
+                        </div>
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-4">
+                                <label for="chunk_strategy" class="form-label">Chunking Strategy</label>
+                                <select class="form-select" id="chunk_strategy" name="chunk_strategy">
+                                    <option value="paragraph" selected>Paragraph-based</option>
+                                    <option value="sentence">Sentence-based</option>
+                                    <option value="sliding">Sliding Window</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label for="chunk_size" class="form-label">Chunk Size (chars)</label>
+                                <input type="number" class="form-control" id="chunk_size" name="chunk_size" value="1000" min="200" max="4000">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="chunk_overlap" class="form-label">Chunk Overlap (chars)</label>
+                                <input type="number" class="form-control" id="chunk_overlap" name="chunk_overlap" value="200" min="0" max="1000">
+                            </div>
+                        </div>
+                        
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">Upload & Process</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-4">
+            <div class="card shadow-sm">
+                <div class="card-header">
+                    <h5 class="mb-0">Chunking Strategies</h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <h6 class="fw-bold">Paragraph-based</h6>
+                        <p class="small">Splits text by paragraphs and groups them to meet the target chunk size. Preserves paragraph meaning and context.</p>
+                    </div>
+                    <div class="mb-3">
+                        <h6 class="fw-bold">Sentence-based</h6>
+                        <p class="small">Splits by sentences and ensures chunks don't break mid-sentence. Good for preserving sentence-level meaning.</p>
+                    </div>
+                    <div class="mb-0">
+                        <h6 class="fw-bold">Sliding Window</h6>
+                        <p class="small">Creates overlapping chunks of fixed size. Useful for dense technical content where precise retrieval is needed.</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card shadow-sm mt-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Processing Steps</h5>
+                </div>
+                <div class="card-body">
+                    <ol class="ps-3 mb-0">
+                        <li>Document text extraction</li>
+                        <li>Text chunking using selected strategy</li>
+                        <li>Embedding generation for each chunk</li>
+                        <li>Vector storage for efficient retrieval</li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

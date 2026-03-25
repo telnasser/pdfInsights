@@ -1,0 +1,262 @@
+{% extends 'layout.html' %}
+
+{% block title %}Knowledge Graph - {{ document.title }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+                    <li class="breadcrumb-item"><a href="{{ url_for('document.view', doc_id=doc_id) }}">{{ document.title }}</a></li>
+                    <li class="breadcrumb-item active" aria-current="page">Knowledge Graph</li>
+                </ol>
+            </nav>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Knowledge Graph Visualization</h5>
+                    <div>
+                        <form class="d-flex" id="searchForm">
+                            <input type="text" class="form-control me-2" id="searchQuery" placeholder="Search entities...">
+                            <button type="submit" class="btn btn-primary">Search</button>
+                        </form>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="ratio ratio-16x9 mb-3" style="height: 600px;">
+                        <iframe src="{{ graph_embed_path }}" frameborder="0" class="rounded"></iframe>
+                    </div>
+                    <div class="alert alert-info">
+                        <h6>Graph Navigation</h6>
+                        <ul class="mb-0">
+                            <li>Click and drag to move the graph</li>
+                            <li>Scroll to zoom in/out</li>
+                            <li>Click on an entity to highlight connections</li>
+                            <li>Double-click to focus on a specific entity</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Graph Statistics</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Entities
+                            <span class="badge bg-primary rounded-pill">{{ graph_stats.node_count }}</span>
+                        </li>
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Relationships
+                            <span class="badge bg-primary rounded-pill">{{ graph_stats.edge_count }}</span>
+                        </li>
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Documents
+                            <span class="badge bg-primary rounded-pill">{{ graph_stats.document_count }}</span>
+                        </li>
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Average Relationships per Entity
+                            <span class="badge bg-info rounded-pill">{{ (graph_stats.edge_count / graph_stats.node_count)|round(1) if graph_stats.node_count > 0 else 0 }}</span>
+                        </li>
+                        {% if document.kg_entity_count is defined and document.kg_entity_count is not none %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Document Entities
+                            <span class="badge bg-success rounded-pill">{{ document.kg_entity_count }}</span>
+                        </li>
+                        {% endif %}
+                        {% if document.kg_relationship_count is defined and document.kg_relationship_count is not none %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Document Relationships
+                            <span class="badge bg-success rounded-pill">{{ document.kg_relationship_count }}</span>
+                        </li>
+                        {% endif %}
+                        {% if document.kg_processing_time is defined and document.kg_processing_time is not none %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            Processing Time
+                            <span class="badge bg-secondary rounded-pill">{{ document.kg_processing_time|round(2) }} seconds</span>
+                        </li>
+                        {% endif %}
+                    </ul>
+                    
+                    <h6 class="mt-4 mb-2">Entity Types Distribution</h6>
+                    <div class="list-group small">
+                        {% for entity_type, count in graph_stats.entity_types.items() %}
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <span>{{ entity_type }}</span>
+                                <div class="progress mt-1" style="height: 4px;">
+                                    <div class="progress-bar" role="progressbar" 
+                                        style="width: {{ (count / graph_stats.node_count * 100)|round|int if graph_stats.node_count > 0 else 0 }}%;" 
+                                        aria-valuenow="{{ (count / graph_stats.node_count * 100)|round|int if graph_stats.node_count > 0 else 0 }}" 
+                                        aria-valuemin="0" 
+                                        aria-valuemax="100"></div>
+                                </div>
+                            </div>
+                            <span class="badge bg-secondary rounded-pill">{{ count }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div class="alert alert-info mt-3 mb-0">
+                        <i class="bi bi-info-circle me-2"></i>
+                        <small>
+                            Knowledge graphs help identify connections between concepts in your documents. 
+                            Entity types like PERSON, ORG, LOC identify different kinds of named entities in the text.
+                        </small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Top Entities</h5>
+                </div>
+                <div class="card-body p-0">
+                    <ul class="list-group list-group-flush" id="entityList">
+                        {% for entity in entity_stats %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center entity-item" 
+                            data-entity="{{ entity.entity }}">
+                            <div>
+                                <span class="entity-text">{{ entity.entity }}</span>
+                                <span class="badge bg-info text-dark ms-2">{{ entity.type }}</span>
+                            </div>
+                            <span class="badge bg-primary rounded-pill">{{ entity.count }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card mb-4" id="searchResultsCard" style="display: none;">
+                <div class="card-header">
+                    <h5 class="mb-0">Search Results</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>Entities</h6>
+                            <ul class="list-group" id="entityResults">
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Relationships</h6>
+                            <ul class="list-group" id="relationshipResults">
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const searchForm = document.getElementById('searchForm');
+    const searchQuery = document.getElementById('searchQuery');
+    const searchResultsCard = document.getElementById('searchResultsCard');
+    const entityResults = document.getElementById('entityResults');
+    const relationshipResults = document.getElementById('relationshipResults');
+    const entityItems = document.querySelectorAll('.entity-item');
+    
+    // Add click event to entities in the sidebar
+    entityItems.forEach(item => {
+        item.addEventListener('click', function() {
+            const entity = this.dataset.entity;
+            searchQuery.value = entity;
+            searchForm.dispatchEvent(new Event('submit'));
+        });
+    });
+    
+    // Handle search form submission
+    searchForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const query = searchQuery.value.trim();
+        if (!query) return;
+        
+        // Show loading state
+        entityResults.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading...</div>';
+        relationshipResults.innerHTML = '';
+        searchResultsCard.style.display = 'block';
+        
+        // Fetch search results
+        fetch(`/document/graph/api/search?q=${encodeURIComponent(query)}&doc_id={{ doc_id }}`)
+            .then(response => response.json())
+            .then(data => {
+                // Clear results
+                entityResults.innerHTML = '';
+                relationshipResults.innerHTML = '';
+                
+                // Add entities
+                if (data.entities && data.entities.length > 0) {
+                    data.entities.forEach(entity => {
+                        const li = document.createElement('li');
+                        li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                        li.innerHTML = `
+                            <div>
+                                <span>${escapeHtml(entity.entity)}</span>
+                                <span class="badge bg-info text-dark ms-2">${escapeHtml(entity.type)}</span>
+                            </div>
+                            <span class="badge bg-primary rounded-pill">${entity.count}</span>
+                        `;
+                        entityResults.appendChild(li);
+                    });
+                } else {
+                    entityResults.innerHTML = '<li class="list-group-item">No entities found</li>';
+                }
+                
+                // Add relationships
+                if (data.relationships && data.relationships.length > 0) {
+                    data.relationships.forEach(rel => {
+                        const li = document.createElement('li');
+                        li.className = 'list-group-item';
+                        li.innerHTML = `
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <span class="fw-bold">${escapeHtml(rel.source)}</span>
+                                <span class="badge bg-secondary">${rel.weight}</span>
+                            </div>
+                            <div class="d-flex align-items-center">
+                                <i class="bi bi-arrow-right me-2"></i> 
+                                <span>${escapeHtml(rel.target)}</span>
+                                <span class="badge bg-info text-dark ms-2">${escapeHtml(rel.type)}</span>
+                            </div>
+                        `;
+                        relationshipResults.appendChild(li);
+                    });
+                } else {
+                    relationshipResults.innerHTML = '<li class="list-group-item">No relationships found</li>';
+                }
+            })
+            .catch(error => {
+                console.error('Error searching knowledge graph:', error);
+                entityResults.innerHTML = '<li class="list-group-item text-danger">Error searching knowledge graph</li>';
+                relationshipResults.innerHTML = '';
+            });
+    });
+    
+    // Helper function to escape HTML
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,353 @@
+{% extends "layout.html" %}
+
+{% block title %}Document View - {{ document.title or document.filename }}{% endblock %}
+
+{% block head_extras %}
+<!-- PDF.js Viewer Styles -->
+<style>
+    .pdf-container {
+        height: 600px;
+        background-color: #333;
+        border-radius: 5px;
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .pdf-controls {
+        background-color: rgba(0, 0, 0, 0.7);
+        padding: 10px;
+        border-bottom: 1px solid #444;
+    }
+    
+    .visualization-container {
+        height: 400px;
+        background-color: #333;
+        border-radius: 5px;
+        position: relative;
+    }
+    
+    .visualization-tooltip {
+        position: absolute;
+        padding: 10px;
+        background-color: rgba(0, 0, 0, 0.8);
+        border-radius: 5px;
+        border: 1px solid #444;
+        color: #fff;
+        font-size: 12px;
+        pointer-events: none;
+        max-width: 250px;
+        z-index: 1000;
+    }
+    
+    .chunk-card {
+        margin-bottom: 10px;
+        transition: background-color 0.5s ease;
+    }
+    
+    .chunk-card:hover {
+        background-color: rgba(13, 202, 240, 0.1) !important;
+    }
+    
+    .chunk-collapse {
+        max-height: 400px;
+        overflow-y: auto;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1>{{ document.title or document.filename }}</h1>
+            <p class="text-muted">
+                <span><i class="bi bi-file-earmark-text"></i> {{ document.num_pages }} pages</span>
+                <span class="ms-3"><i class="bi bi-puzzle"></i> {{ document.num_chunks }} chunks</span>
+                <span class="ms-3"><i class="bi bi-calendar"></i> Uploaded: {{ document.upload_date.strftime('%Y-%m-%d') }}</span>
+            </p>
+        </div>
+        
+        <div>
+            <a href="{{ url_for('query.query_page') }}" class="btn btn-outline-primary me-2">
+                <i class="bi bi-question-circle"></i> Query Document
+            </a>
+            <a href="{{ url_for('document.knowledge_graph_view', doc_id=doc_id) }}" class="btn btn-outline-info me-2">
+                <i class="bi bi-diagram-3"></i> Knowledge Graph
+            </a>
+            <button class="btn btn-outline-danger" id="deleteBtn" data-bs-toggle="modal" data-bs-target="#deleteModal">
+                <i class="bi bi-trash"></i> Delete Document
+            </button>
+        </div>
+    </div>
+    
+    <div class="row">
+        <!-- PDF Viewer -->
+        <div class="col-md-7 mb-4">
+            <div class="card shadow-sm">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">PDF Viewer</h5>
+                    <span class="badge bg-secondary">{{ document.file_size|filesizeformat }}</span>
+                </div>
+                <div class="card-body p-0">
+                    <div id="pdfViewer" class="pdf-container"></div>
+                </div>
+            </div>
+            
+            <!-- Visualization -->
+            <div class="card shadow-sm mt-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Chunk Visualization</h5>
+                    <div>
+                        <span class="badge bg-primary me-2">Strategy: {{ document.chunk_strategy }}</span>
+                        <span class="badge bg-secondary me-2">Size: {{ document.chunk_size }}</span>
+                        <span class="badge bg-secondary me-2">Overlap: {{ document.chunk_overlap }}</span>
+                        <button class="btn btn-sm btn-outline-secondary" id="distributionBtn">
+                            Show Size Distribution
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div id="visualization" class="visualization-container"></div>
+                </div>
+                <div class="card-footer small text-muted">
+                    Click on nodes to highlight corresponding chunks in the list
+                </div>
+            </div>
+        </div>
+        
+        <!-- Document Chunks -->
+        <div class="col-md-5">
+            <div class="card shadow-sm">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Document Chunks</h5>
+                    <div class="input-group input-group-sm" style="width: 200px;">
+                        <input type="text" class="form-control" id="chunkSearch" placeholder="Search chunks...">
+                        <button class="btn btn-outline-secondary" type="button" id="clearSearch">Clear</button>
+                    </div>
+                </div>
+                <div class="card-body p-2">
+                    <div id="chunksContainer" style="max-height: 900px; overflow-y: auto;">
+                        <div class="d-flex justify-content-center align-items-center p-5">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span class="ms-3">Loading chunks...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1" aria-labelledby="deleteModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="deleteModalLabel">Delete Document</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete this document? This action cannot be undone.</p>
+                <p class="mb-0"><strong>Document ID:</strong> {{ doc_id }}</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form action="{{ url_for('document.delete_document', doc_id=doc_id) }}" method="POST">
+                    <button type="submit" class="btn btn-danger">Delete Document</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Distribution Modal -->
+<div class="modal fade" id="distributionModal" tabindex="-1" aria-labelledby="distributionModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="distributionModalLabel">Chunk Size Distribution</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="distributionVisualization" style="height: 400px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<!-- PDF Viewer JS -->
+<script src="{{ url_for('static', filename='js/pdf_viewer.js') }}"></script>
+
+<!-- Chunk Visualization JS -->
+<script src="{{ url_for('static', filename='js/chunk_visualization.js') }}"></script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Initialize PDF Viewer
+        const pdfViewer = new PDFViewer('pdfViewer', '{{ pdf_url }}');
+        
+        // Initialize Visualization with data from server
+        const visualizationData = {{ visualization_data|safe }};
+        if (visualizationData && !visualizationData.error) {
+            createChunkVisualization('visualization', visualizationData);
+        } else {
+            document.getElementById('visualization').innerHTML = `
+                <div class="alert alert-warning m-3">
+                    Unable to create visualization: ${visualizationData.error || 'No data available'}
+                </div>
+            `;
+        }
+        
+        // Load document chunks
+        loadChunks();
+        
+        // Distribution button click handler
+        document.getElementById('distributionBtn').addEventListener('click', function() {
+            // Fetch distribution data
+            fetch('/document/visualization/{{ doc_id }}?type=distribution')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.error) {
+                        const distributionModal = new bootstrap.Modal(document.getElementById('distributionModal'));
+                        createDistributionChart('distributionVisualization', data);
+                        distributionModal.show();
+                    } else {
+                        alert('Error loading distribution data: ' + data.error);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Failed to load distribution data');
+                });
+        });
+        
+        // Search functionality
+        const searchInput = document.getElementById('chunkSearch');
+        const clearButton = document.getElementById('clearSearch');
+        
+        searchInput.addEventListener('input', function() {
+            filterChunks(this.value.toLowerCase());
+        });
+        
+        clearButton.addEventListener('click', function() {
+            searchInput.value = '';
+            filterChunks('');
+        });
+        
+        function filterChunks(query) {
+            const chunks = document.querySelectorAll('.chunk-card');
+            chunks.forEach(chunk => {
+                const text = chunk.textContent.toLowerCase();
+                if (text.includes(query)) {
+                    chunk.style.display = '';
+                } else {
+                    chunk.style.display = 'none';
+                }
+            });
+        }
+        
+        function loadChunks() {
+            fetch('/document/chunks/{{ doc_id }}')
+                .then(response => response.json())
+                .then(data => {
+                    const chunksContainer = document.getElementById('chunksContainer');
+                    
+                    if (data.error) {
+                        chunksContainer.innerHTML = `
+                            <div class="alert alert-danger m-3">
+                                Error loading chunks: ${data.error}
+                            </div>
+                        `;
+                        return;
+                    }
+                    
+                    if (!data.chunks || data.chunks.length === 0) {
+                        chunksContainer.innerHTML = `
+                            <div class="alert alert-warning m-3">
+                                No chunks found for this document.
+                            </div>
+                        `;
+                        return;
+                    }
+                    
+                    let html = '';
+                    
+                    data.chunks.forEach((chunk, index) => {
+                        const chunkId = chunk.id || index;
+                        const collapseId = `chunk-collapse-${chunkId}`;
+                        
+                        html += `
+                            <div class="card chunk-card" id="chunk-${chunkId}">
+                                <div class="card-header d-flex justify-content-between py-2">
+                                    <button class="btn btn-link btn-sm text-decoration-none" 
+                                            type="button" 
+                                            data-bs-toggle="collapse" 
+                                            data-bs-target="#${collapseId}" 
+                                            aria-expanded="false" 
+                                            aria-controls="${collapseId}">
+                                        Chunk #${chunkId}
+                                        ${chunk.page_num ? ` (Page ${chunk.page_num})` : ''}
+                                    </button>
+                                    <div>
+                                        <button class="btn btn-sm btn-outline-info" 
+                                                onclick="copyChunkText('${collapseId}')" 
+                                                title="Copy text">
+                                            <i class="bi bi-clipboard"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="collapse" id="${collapseId}">
+                                    <div class="card-body chunk-collapse">
+                                        <div class="mb-2">
+                                            <strong>Size:</strong> ${chunk.text ? chunk.text.length : 0} chars
+                                            ${chunk.position ? `<span class="ms-2"><strong>Position:</strong> ${chunk.position}</span>` : ''}
+                                        </div>
+                                        <pre class="chunk-text border p-2 bg-dark-subtle rounded" style="white-space: pre-wrap;">${chunk.text || 'No text available'}</pre>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    chunksContainer.innerHTML = html;
+                    
+                    // Initialize tooltips
+                    function initTooltips() {
+                        const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+                        tooltipTriggerList.forEach(tooltipTriggerEl => {
+                            new bootstrap.Tooltip(tooltipTriggerEl);
+                        });
+                    }
+                    initTooltips();
+                    
+                    // Initialize copy functionality
+                    window.copyChunkText = function(collapseId) {
+                        const chunkTextElement = document.querySelector(`#${collapseId} .chunk-text`);
+                        if (chunkTextElement) {
+                            navigator.clipboard.writeText(chunkTextElement.textContent)
+                                .then(() => {
+                                    alert("Chunk text copied to clipboard");
+                                })
+                                .catch(err => {
+                                    console.error('Could not copy text: ', err);
+                                    alert("Failed to copy text");
+                                });
+                        }
+                    };
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    document.getElementById('chunksContainer').innerHTML = `
+                        <div class="alert alert-danger m-3">
+                            Failed to load chunks: ${error.message}
+                        </div>
+                    `;
+                });
+        }
+    });
+</script>
+{% endblock %}

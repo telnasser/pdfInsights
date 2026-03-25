@@ -1,0 +1,122 @@
+/* Custom CSS for the Advanced RAG Application */
+
+/* Main Styles */
+body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+main {
+    flex: 1;
+}
+
+/* PDF Viewer Styles */
+.pdf-container {
+    border: 1px solid #444;
+    border-radius: 5px;
+}
+
+.pdf-controls {
+    padding: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: rgba(0, 0, 0, 0.1);
+}
+
+.pdf-page, .pdf-zoom {
+    display: inline-block;
+    margin: 0 10px;
+}
+
+.pdf-canvas-container {
+    background-color: #333;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    overflow: auto;
+}
+
+/* Visualization Styles */
+.visualization-container {
+    position: relative;
+    overflow: hidden;
+}
+
+.visualization-tooltip {
+    position: absolute;
+    padding: 10px;
+    background-color: rgba(0, 0, 0, 0.8);
+    border-radius: 5px;
+    color: white;
+    font-size: 0.8rem;
+    pointer-events: none;
+    z-index: 1000;
+    max-width: 300px;
+}
+
+/* Chunk Styling */
+.chunk-card {
+    border: 1px solid #444;
+    border-radius: 5px;
+    margin-bottom: 10px;
+    transition: all 0.3s ease;
+}
+
+.chunk-card:hover {
+    border-color: var(--bs-info);
+}
+
+.chunk-text {
+    font-family: monospace;
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+}
+
+/* Response Styling */
+.response-text {
+    line-height: 1.6;
+}
+
+.citation {
+    color: var(--bs-info);
+    cursor: pointer;
+}
+
+/* Source Chunks Styling */
+.source-chunk {
+    border-bottom: 1px solid #444;
+    padding-bottom: 10px;
+}
+
+.source-chunk:last-child {
+    border-bottom: none;
+}
+
+.source-text {
+    font-family: monospace;
+    overflow-wrap: break-word;
+}
+
+/* Utilities */
+.clickable {
+    cursor: pointer;
+}
+
+/* Icons */
+.icon-square {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.75rem;
+}
+
+/* Home Page Features */
+.feature-icon {
+    width: 4rem;
+    height: 4rem;
+    border-radius: 0.75rem;
+}
