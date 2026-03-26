@@ -237,8 +237,12 @@ def delete_document(doc_id):
 def visualization(doc_id):
     """Get visualization data for a document."""
     try:
-        visualization_data = visualizer.create_chunk_visualization(doc_id, vector_store)
-        return jsonify(visualization_data)
+        viz_type = request.args.get('type', 'projection')
+        if viz_type == 'distribution':
+            data = visualizer.analyze_chunk_distribution(doc_id, vector_store)
+        else:
+            data = visualizer.create_chunk_visualization(doc_id, vector_store)
+        return jsonify(data)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
