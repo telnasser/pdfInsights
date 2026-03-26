@@ -77,24 +77,23 @@ class KnowledgeGraph:
             
             # Add entities to the graph
             for entity, entity_type in entities:
-                self.graph.add_node(entity, 
-                                    type=entity_type, 
-                                    doc_ids=set([doc_id]),
-                                    chunk_indices=set([chunk_idx]))
-                
+                if self.graph.has_node(entity):
+                    # Update existing node — do NOT overwrite, just extend sets
+                    node_data = self.graph.nodes[entity]
+                    node_data.setdefault('doc_ids', set()).add(doc_id)
+                    node_data.setdefault('chunk_indices', set()).add(chunk_idx)
+                else:
+                    # Brand-new node
+                    self.graph.add_node(entity,
+                                        type=entity_type,
+                                        doc_ids=set([doc_id]),
+                                        chunk_indices=set([chunk_idx]))
+
                 # Update entity metadata
                 self.entity_counts[entity] += 1
                 self.entity_contexts[entity].add(chunk_idx)
                 self.document_entities[doc_id].add(entity)
                 all_entities.add(entity)
-                
-                # Get existing node attributes
-                if self.graph.has_node(entity):
-                    node_data = self.graph.nodes[entity]
-                    if 'doc_ids' in node_data:
-                        node_data['doc_ids'].add(doc_id)
-                    if 'chunk_indices' in node_data:
-                        node_data['chunk_indices'].add(chunk_idx)
             
             # Extract relationships between entities in the same chunk
             if len(entities) > 1:
@@ -821,6 +820,32 @@ class KnowledgeGraph:
                 if doc_id else list(self.graph.nodes)
             )
 
+            # ── If re-syncing a specific doc, purge its stale entities first ──
+            # This prevents old chunk_indices from polluting future traversals.
+            if doc_id:
+                from sqlalchemy import text as _sa_text
+                stale_ids_rows = db.session.execute(
+                    _sa_text(
+                        "SELECT id FROM graph_entity "
+                        "WHERE doc_ids::text LIKE :pat"
+                    ),
+                    {"pat": f"%{doc_id}%"},
+                ).fetchall()
+                stale_ids = [r[0] for r in stale_ids_rows]
+                if stale_ids:
+                    db.session.execute(
+                        _sa_text(
+                            "DELETE FROM graph_relationship "
+                            "WHERE source_id = ANY(:ids) OR target_id = ANY(:ids)"
+                        ),
+                        {"ids": stale_ids},
+                    )
+                    db.session.execute(
+                        _sa_text("DELETE FROM graph_entity WHERE id = ANY(:ids)"),
+                        {"ids": stale_ids},
+                    )
+                    db.session.flush()
+
             upserted_entities = 0
             entity_id_map: Dict[str, int] = {}  # name → db id
 
@@ -828,14 +853,17 @@ class KnowledgeGraph:
                 node_data = self.graph.nodes[name]
                 entity_type = node_data.get('type', 'UNKNOWN')
                 doc_ids_list = list(node_data.get('doc_ids', set()))
-                chunk_idx_list = list(node_data.get('chunk_indices', set()))
+                chunk_idx_list = sorted(node_data.get('chunk_indices', set()))
                 occ = self.entity_counts.get(name, 1)
 
+                # After purge, existing rows for this doc are gone — always insert
                 existing = GraphEntity.query.filter_by(name=name).first()
                 if existing:
-                    # Merge doc_ids / chunk_indices
+                    # Entity belongs to another doc too — merge without duplicates
                     merged_docs = list(set((existing.doc_ids or []) + doc_ids_list))
-                    merged_chunks = list(set((existing.chunk_indices or []) + chunk_idx_list))
+                    # Keep per-doc chunk ranges separate to avoid stale cross-doc indices
+                    existing_chunks = existing.chunk_indices or []
+                    merged_chunks = sorted(set(existing_chunks) | set(chunk_idx_list))
                     existing.doc_ids = merged_docs
                     existing.chunk_indices = merged_chunks
                     existing.occurrence_count = max(existing.occurrence_count, occ)
