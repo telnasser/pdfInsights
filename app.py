@@ -117,6 +117,62 @@ def _rebuild_index_from_db():
 
 _rebuild_index_from_db()
 
+
+def _rebuild_graph_from_db():
+    """
+    Called once at startup (per worker).  If the knowledge-graph JSON files are
+    absent but DB graph tables are also empty (e.g. first boot or after cleanup),
+    re-build the in-memory + DB graph from the chunk table so queries always
+    have graph data available.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    kg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'knowledge_graph')
+    graph_json = os.path.join(kg_dir, 'graph.json')
+
+    with app.app_context():
+        from models import GraphEntity, Chunk, Document
+        db_empty = GraphEntity.query.count() == 0
+        json_missing = not os.path.exists(graph_json)
+
+        if not db_empty:
+            log.info("Graph tables populated (%d entities) — skipping rebuild",
+                     GraphEntity.query.count())
+            return
+
+        if db_empty and not json_missing:
+            # JSON exists but DB is empty — sync from in-memory graph on first query
+            log.info("Graph JSON exists but DB empty — will sync on first query")
+            return
+
+        # Both DB and JSON are missing — rebuild from chunks
+        chunk_count = Chunk.query.count()
+        if chunk_count == 0:
+            log.info("No chunks in DB — skipping graph rebuild")
+            return
+
+        log.info("Rebuilding knowledge graph from %d DB chunks …", chunk_count)
+        try:
+            from rag.knowledge_graph import KnowledgeGraph
+            kg = KnowledgeGraph()
+
+            docs = Document.query.all()
+            for doc in docs:
+                chunks_db = Chunk.query.filter_by(document_id=doc.id).order_by(Chunk.chunk_index).all()
+                chunks_list = [{'chunk_index': c.chunk_index, 'text': c.text} for c in chunks_db]
+                stats = kg.add_document(doc.id, chunks_list)
+                log.info("Graph built for doc %s: %d entities, %d rels",
+                         doc.id[:12], stats['entity_count'], stats['relationship_count'])
+                kg.sync_to_db(doc_id=doc.id)
+
+            log.info("Graph rebuild complete")
+        except Exception as exc:
+            log.error("Graph rebuild failed: %s", exc, exc_info=True)
+
+
+_rebuild_graph_from_db()
+
 # Add datetime to all templates
 @app.context_processor
 def inject_now():
