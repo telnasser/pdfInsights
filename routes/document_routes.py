@@ -307,12 +307,32 @@ def knowledge_graph_view(doc_id):
         # Generate graph visualization
         graph_path = knowledge_graph.visualize(doc_id=doc_id, output_path=f'static/graph_{doc_id}.html')
         
-        # Get top entities for the document
+        # Get top entities for the document (reads from DB directly)
         entity_stats = knowledge_graph._get_top_entities(doc_id, limit=20)
         
-        # Get graph stats
+        # Get graph stats (reads from DB directly)
         graph_stats = knowledge_graph.get_stats()
-        
+
+        # Always refresh kg_entity_count from the actual graph_entity table so the
+        # badge reflects the current (post-LLM) data, not the stale first-run count.
+        try:
+            from sqlalchemy import text as _st
+            actual_entity_count = db.session.execute(
+                _st("SELECT COUNT(*) FROM graph_entity WHERE doc_ids::text LIKE :pat"),
+                {"pat": f"%{doc_id}%"}
+            ).scalar() or 0
+            actual_rel_count = db.session.execute(
+                _st("SELECT COUNT(*) FROM graph_relationship WHERE doc_id = :did"),
+                {"did": doc_id}
+            ).scalar() or 0
+            if (document.kg_entity_count != actual_entity_count
+                    or document.kg_relationship_count != actual_rel_count):
+                document.kg_entity_count = actual_entity_count
+                document.kg_relationship_count = actual_rel_count
+                db.session.commit()
+        except Exception as _refresh_err:
+            print(f"Warning: could not refresh kg counts: {_refresh_err}")
+
         return render_template(
             'knowledge_graph.html',
             document=document,
