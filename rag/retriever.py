@@ -83,24 +83,8 @@ class Retriever:
         logger.info("QueryRouter decision: %s (kw=%.1f, vec=%.1f)",
                     mode.value, routing['keyword_score'], routing['vector_score'])
 
-        # ── Stage 2: multi-hop graph expansion ────────────────────────
-        graph_chunk_indices: List[int] = []
-        graph_metadata: Dict[str, Any] = {}
-        if self.knowledge_graph is not None:
-            try:
-                graph_result = self.knowledge_graph.multi_hop_search_db(
-                    query, hops=2, doc_id=doc_id
-                )
-                graph_chunk_indices = graph_result.get('chunk_indices', [])
-                graph_metadata = graph_result
-                logger.info("Graph multi-hop: found %d chunk indices, "
-                            "entities=%s",
-                            len(graph_chunk_indices),
-                            [e['entity'] for e in graph_result.get('all_entities', [])[:5]])
-            except Exception as exc:
-                logger.error("Graph multi-hop error: %s", exc, exc_info=True)
-
-        # ── Stage 3: execute search(es) ───────────────────────────────
+        # ── Stage 2: execute searches FIRST ───────────────────────────
+        # Run search before graph so we can seed graph BFS from results.
         vector_results: List[Dict[str, Any]] = []
         keyword_results: List[Dict[str, Any]] = []
 
@@ -109,6 +93,49 @@ class Retriever:
 
         if mode in (SearchMode.KEYWORD, SearchMode.HYBRID):
             keyword_results = self.keyword_search.search(query, doc_id=doc_id, top_k=k * 2)
+
+        # ── Stage 3a: graph expansion seeded by QUERY ─────────────────
+        # Works when the query contains named entities (e.g. "Infoblox").
+        graph_chunk_indices: List[int] = []
+        graph_metadata: Dict[str, Any] = {'all_entities': []}
+        if self.knowledge_graph is not None:
+            try:
+                graph_result = self.knowledge_graph.multi_hop_search_db(
+                    query, hops=2, doc_id=doc_id
+                )
+                graph_chunk_indices = graph_result.get('chunk_indices', [])
+                graph_metadata = graph_result
+                logger.info("Graph (query-seeded): %d indices, entities=%s",
+                            len(graph_chunk_indices),
+                            [e['entity'] for e in graph_result.get('all_entities', [])[:5]])
+            except Exception as exc:
+                logger.error("Graph multi-hop (query) error: %s", exc, exc_info=True)
+
+        # ── Stage 3b: graph expansion seeded by TOP SEARCH RESULTS ────
+        # This is the key path for queries like "what streaming service did he
+        # build?" — keyword/vector finds the Shahid.net chunk, then graph BFS
+        # from entities IN that chunk surfaces related context chunks.
+        if self.knowledge_graph is not None:
+            top_initial = (vector_results + keyword_results)[:3]
+            if top_initial:
+                try:
+                    combined_text = " ".join(r['text'][:500] for r in top_initial)
+                    graph_result2 = self.knowledge_graph.multi_hop_search_db(
+                        combined_text, hops=1, doc_id=doc_id
+                    )
+                    extra_indices = graph_result2.get('chunk_indices', [])
+                    existing_set: Set[int] = set(graph_chunk_indices)
+                    for idx in extra_indices:
+                        if idx not in existing_set:
+                            graph_chunk_indices.append(idx)
+                            existing_set.add(idx)
+                    extra_ents = graph_result2.get('all_entities', [])
+                    logger.info("Graph (result-seeded): +%d indices via entities=%s",
+                                len(extra_indices),
+                                [e['entity'] for e in extra_ents[:5]])
+                    graph_metadata.setdefault('all_entities', []).extend(extra_ents)
+                except Exception as exc:
+                    logger.error("Graph multi-hop (results) error: %s", exc, exc_info=True)
 
         # ── Stage 4: fetch graph-sourced chunks from DB ───────────────
         graph_chunks = self._fetch_chunks_by_indices(graph_chunk_indices, doc_id)
