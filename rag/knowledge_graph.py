@@ -138,25 +138,40 @@ class KnowledgeGraph:
             List of (entity_text, entity_type) tuples
         """
         try:
+            import re as _re2
             # Limit text size to avoid processing extremely large chunks
             max_text_length = 10000
             if len(text) > max_text_length:
                 text = text[:max_text_length]
-                
+
+            # Strip domain suffixes BEFORE running spaCy so that "Infoblox.com"
+            # becomes "Infoblox" and is recognised as an ORG entity.
+            text = _re2.sub(
+                r'\b(\w{3,})\.(com|net|org|io|co|ae|sa|jo|ca|uk|us|gov|edu)\b',
+                r'\1', text, flags=_re2.I
+            )
+
             doc = nlp(text)
             entities = []
             
+            # Regex to strip trailing domain suffixes so "Infoblox.com" → "Infoblox"
+            import re as _re
+            _DOMAIN_SUFFIX = _re.compile(
+                r'\.(com|net|org|io|co|uk|gov|edu|ca|ae|sa|jo|us)$', _re.I
+            )
+
             # Extract named entities safely
             try:
                 for ent in doc.ents:
                     # Filter out very short entities and common false positives
                     if len(ent.text) > 1 and ent.text.lower() not in ['the', 'a', 'an']:
-                        # Clean and normalize entity text
-                        entity_text = ent.text.strip().title()
+                        # Clean and normalize entity text; strip domain suffixes
+                        entity_text = _DOMAIN_SUFFIX.sub('', ent.text.strip()).strip('.').title()
                         # Limit entity length to avoid memory issues
                         if len(entity_text) > 100:
                             entity_text = entity_text[:100]
-                        entities.append((entity_text, ent.label_))
+                        if len(entity_text) > 1:
+                            entities.append((entity_text, ent.label_))
             except Exception as e:
                 print(f"Error extracting named entities: {str(e)}")
             
@@ -965,6 +980,28 @@ class KnowledgeGraph:
                 return self.multi_hop_search(query, hops, doc_id,
                                               max_neighbors, limit_chunk_indices)
 
+            # ── Common abbreviation → expansion map ───────────────────────────────
+            _ABBREV = {
+                'mba': ['master', 'business', 'administration'],
+                'ms': ['master', 'science'],
+                'bs': ['bachelor', 'science'],
+                'phd': ['doctor', 'philosophy'],
+                'aws': ['amazon', 'web', 'services'],
+                'gcp': ['google', 'cloud'],
+                'ai': ['artificial', 'intelligence'],
+                'ml': ['machine', 'learning'],
+                'nlp': ['natural', 'language', 'processing'],
+                'vod': ['video', 'demand'],
+                'rag': ['retrieval', 'augmented'],
+                'llm': ['language', 'model'],
+                'ddi': ['dns', 'dhcp', 'ipam'],
+                'saas': ['software', 'service'],
+                'ci': ['continuous', 'integration'],
+                'cd': ['continuous', 'delivery'],
+                'k8s': ['kubernetes'],
+                'pmp': ['project', 'management', 'professional'],
+            }
+
             # Extract seed entity names from query
             raw_entities = self._extract_entities(query)
             exact_names = [pair[0].title() for pair in raw_entities]
@@ -978,6 +1015,14 @@ class KnowledgeGraph:
                                               'have', 'been', 'being', 'where',
                                               'when', 'what', 'who', 'how')
             ]
+
+            # Expand abbreviations — e.g. "MBA" → ["master","business","administration"]
+            expanded: List[str] = []
+            for tok in nlp(query):
+                abbrev = _ABBREV.get(tok.text.lower())
+                if abbrev:
+                    expanded.extend(abbrev)
+            kw_tokens = list(set(kw_tokens + expanded))
 
             from sqlalchemy import or_
 
