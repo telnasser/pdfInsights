@@ -555,6 +555,11 @@ JSON array:"""
                 for r in rows
             ]
         except Exception as ex:
+            try:
+                from app import db as _db2
+                _db2.session.rollback()
+            except Exception:
+                pass
             print(f"_get_top_entities DB fallback: {ex}")
             # fallback: in-memory
             doc_entities = self.document_entities.get(doc_id, set())
@@ -817,6 +822,11 @@ JSON array:"""
                 'entity_types': entity_types,
             }
         except Exception as ex:
+            try:
+                from app import db as _db2
+                _db2.session.rollback()
+            except Exception:
+                pass
             print(f"get_stats DB fallback: {ex}")
             # fallback: in-memory NetworkX graph
             entity_types = defaultdict(int)
