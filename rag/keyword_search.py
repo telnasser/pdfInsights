@@ -52,8 +52,19 @@ class KeywordSearch:
         try:
             from app import db  # local import to avoid circular deps
 
+            # Build an OR-based tsquery so any significant term can match.
+            # plainto_tsquery uses AND which requires ALL terms in one chunk.
+            # We split on whitespace, drop pure stop-word tokens (len <= 2),
+            # and join survivors with the OR operator '|'.
+            raw_terms = [t.strip(".,!?;:\"'()[]") for t in query.strip().split()]
+            sig_terms = [t for t in raw_terms if len(t) > 2]
+            if not sig_terms:
+                sig_terms = raw_terms  # fallback: use everything
+
+            or_query = " | ".join(sig_terms)
+
             params: Dict[str, Any] = {
-                "query": query.strip(),
+                "or_query": or_query,
                 "lang": self.TS_LANG,
                 "top_k": top_k,
             }
@@ -72,13 +83,13 @@ class KeywordSearch:
                     c.page_num,
                     ts_rank_cd(
                         to_tsvector(:lang, c.text),
-                        plainto_tsquery(:lang, :query),
+                        to_tsquery(:lang, :or_query),
                         32
                     ) AS rank
                 FROM chunk c
                 WHERE
                     to_tsvector(:lang, c.text) @@
-                    plainto_tsquery(:lang, :query)
+                    to_tsquery(:lang, :or_query)
                     {doc_filter}
                 ORDER BY rank DESC
                 LIMIT :top_k
@@ -101,13 +112,52 @@ class KeywordSearch:
                 })
 
             logger.info(
-                "KeywordSearch: query='%s' doc_id=%s → %d results",
-                query[:60], doc_id, len(results)
+                "KeywordSearch: query='%s' tsquery='%s' doc_id=%s → %d results",
+                query[:60], or_query[:60], doc_id, len(results)
             )
             return results
 
         except Exception as exc:
-            logger.error("KeywordSearch error: %s", exc, exc_info=True)
+            logger.error("KeywordSearch FTS error: %s — falling back to ILIKE", exc)
+            return self._ilike_fallback(query, doc_id, top_k)
+
+    def _ilike_fallback(
+        self,
+        query: str,
+        doc_id: Optional[str],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        """Simple ILIKE-based fallback when FTS fails or returns nothing."""
+        try:
+            from app import db
+            raw_terms = [t.strip(".,!?;:\"'()[]") for t in query.strip().split()]
+            sig_terms = [t for t in raw_terms if len(t) > 2]
+            if not sig_terms:
+                return []
+
+            from sqlalchemy import or_
+            from models import Chunk
+            filters = [Chunk.text.ilike(f'%{t}%') for t in sig_terms[:10]]
+            q = Chunk.query.filter(or_(*filters))
+            if doc_id:
+                q = q.filter(Chunk.document_id == doc_id)
+            rows = q.limit(top_k).all()
+
+            results = []
+            for c in rows:
+                results.append({
+                    "id": c.id,
+                    "document_id": c.document_id,
+                    "chunk_index": c.chunk_index,
+                    "text": c.text,
+                    "page_num": c.page_num,
+                    "score": 0.3,
+                    "search_type": "keyword",
+                })
+            logger.info("KeywordSearch ILIKE fallback: %d results", len(results))
+            return results
+        except Exception as exc2:
+            logger.error("KeywordSearch ILIKE fallback error: %s", exc2)
             return []
 
     def search_by_terms(
