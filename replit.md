@@ -9,6 +9,12 @@ A Flask-based Retrieval-Augmented Generation (RAG) system with intelligent query
 - **FAISS** (IndexFlatIP): Vector index for cosine-similarity semantic search
 - **NetworkX + JSON files**: In-memory graph used for visualization; also serves as fallback when PostgreSQL graph tables are empty
 
+### Entity Extraction (Knowledge Graph Ingestion)
+- **Primary**: Claude Haiku via `KnowledgeGraph._extract_entities_llm()` — sends each chunk to the LLM with a structured prompt; extracts COMPANY, ROLE, TECHNOLOGY, DATE_RANGE, PRODUCT, DEGREE, SKILL, LOCATION, PERSON entities
+- **Fallback**: spaCy `en_core_web_sm` NER + noun chunks (used if API unavailable)
+- **Query-time**: always uses spaCy (fast, no API call needed for query entity extraction)
+- **Cache**: SHA-256 hash → entity list, in-memory per `KnowledgeGraph` instance
+
 ### Core RAG Pipeline (`routes/query_routes.py` → `rag/retriever.py`)
 
 ```
