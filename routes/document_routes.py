@@ -322,8 +322,8 @@ def knowledge_graph_view(doc_id):
                 {"pat": f"%{doc_id}%"}
             ).scalar() or 0
             actual_rel_count = db.session.execute(
-                _st("SELECT COUNT(*) FROM graph_relationship WHERE doc_id = :did"),
-                {"did": doc_id}
+                _st("SELECT COUNT(*) FROM graph_relationship WHERE doc_ids::text LIKE :pat"),
+                {"pat": f"%{doc_id}%"}
             ).scalar() or 0
             if (document.kg_entity_count != actual_entity_count
                     or document.kg_relationship_count != actual_rel_count):
@@ -331,6 +331,7 @@ def knowledge_graph_view(doc_id):
                 document.kg_relationship_count = actual_rel_count
                 db.session.commit()
         except Exception as _refresh_err:
+            db.session.rollback()
             print(f"Warning: could not refresh kg counts: {_refresh_err}")
 
         return render_template(
