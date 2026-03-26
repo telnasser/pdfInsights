@@ -227,7 +227,7 @@ class Retriever:
                     'chunk_index': c.chunk_index,
                     'text': c.text,
                     'page_num': c.page_num,
-                    'score': 0.5,       # neutral graph-sourced score
+                    'score': 0.3,       # graph-sourced; kept below keyword/vector baseline
                     'search_type': 'graph',
                 })
             return results
@@ -271,16 +271,16 @@ class Retriever:
 
         if mode == SearchMode.KEYWORD:
             _add(keyword_results, 1.0)
-            _add(graph_chunks, 0.6)
+            _add(graph_chunks, 0.45)
             _add(vector_results, 0.4)
         elif mode == SearchMode.VECTOR:
             _add(vector_results, 1.0)
-            _add(graph_chunks, 0.6)
+            _add(graph_chunks, 0.45)
             _add(keyword_results, 0.4)
         else:  # HYBRID
             _add(vector_results, 0.7)
             _add(keyword_results, 0.7)
-            _add(graph_chunks, 0.6)
+            _add(graph_chunks, 0.45)
 
         merged.sort(key=lambda x: x.get('blended_score', 0), reverse=True)
         # Normalise score field to blended_score for downstream compatibility
