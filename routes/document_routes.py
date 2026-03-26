@@ -96,7 +96,7 @@ def upload():
                 doc = Document(
                     id=processed_doc['id'],
                     filename=filename,
-                    title=processed_doc['metadata'].get('title') or processed_doc['metadata'].get('extracted_title'),
+                    title=(processed_doc['metadata'].get('title') or processed_doc['metadata'].get('extracted_title') or '')[:500] or None,
                     num_pages=processed_doc['metadata'].get('page_count'),
                     num_chunks=len(processed_doc['chunks']),
                     file_size=os.path.getsize(file_path),
