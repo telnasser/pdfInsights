@@ -26,7 +26,34 @@ class KnowledgeGraph:
     Extracts entities and relationships from document chunks,
     builds a graph representation, and allows querying the graph.
     """
-    
+
+    # ── LLM extraction prompt ─────────────────────────────────────────────────
+    _LLM_PROMPT = """Extract all important named entities from the resume/document text below.
+Return ONLY a valid JSON array — no explanation, no markdown fences.
+
+Entity types to use:
+- PERSON       : person names
+- COMPANY      : employer or client company names (e.g. "Infoblox", "MBC Group", "STC")
+- UNIVERSITY   : academic institutions (e.g. "German Jordanian University")
+- ROLE         : job titles (e.g. "Director of Software Engineering")
+- DATE_RANGE   : employment or study periods (e.g. "March 2025 - Present", "2018–2022")
+- TECHNOLOGY   : tools, languages, frameworks, cloud services (e.g. "AWS", "Kubernetes", "Python")
+- LOCATION     : cities, countries, regions
+- SKILL        : competencies (e.g. "Agile", "Team Leadership")
+- PRODUCT      : products or services launched (e.g. "Shahid", "GraphRAG platform")
+- DEGREE       : academic qualifications (e.g. "Master of Business Administration")
+
+Rules:
+- Use the clean canonical name (no trailing punctuation, no "the", no "a/an").
+- If a company name appears with ".com" or similar suffix strip it: "Infoblox.com" → "Infoblox".
+- Include every employer, every technology mentioned, every date range.
+- Maximum 60 entities total.
+
+Text:
+{text}
+
+JSON array:"""
+
     def __init__(self, db_path: str = "./knowledge_graph"):
         """
         Initialize the knowledge graph.
@@ -39,6 +66,19 @@ class KnowledgeGraph:
         self.entity_counts = defaultdict(int)
         self.entity_contexts = defaultdict(set)
         self.document_entities = defaultdict(set)
+
+        # Simple in-memory cache: sha256(text) → entity list
+        self._llm_entity_cache: Dict[str, List[Tuple[str, str]]] = {}
+
+        # Initialise the Anthropic client once
+        self._anthropic_client = None
+        try:
+            import anthropic as _anthropic
+            _api_key = os.environ.get('ANTHROPIC_API_KEY')
+            if _api_key:
+                self._anthropic_client = _anthropic.Anthropic(api_key=_api_key)
+        except Exception as _e:
+            print(f"KnowledgeGraph: Anthropic unavailable — will use spaCy NER ({_e})")
         
         # Create directory if it doesn't exist
         os.makedirs(db_path, exist_ok=True)
@@ -72,9 +112,9 @@ class KnowledgeGraph:
             if not chunk_text:
                 continue
                 
-            # Extract entities from chunk
-            entities = self._extract_entities(chunk_text)
-            
+            # Extract entities — use LLM during ingestion for high-quality results
+            entities = self._extract_entities_llm(chunk_text)
+
             # Add entities to the graph
             for entity, entity_type in entities:
                 if self.graph.has_node(entity):
@@ -127,80 +167,132 @@ class KnowledgeGraph:
             'top_entities': self._get_top_entities(doc_id, limit=10)
         }
     
+    # ── LLM-powered entity extraction (used during document ingestion) ─────────
+
+    def _extract_entities_llm(self, text: str) -> List[Tuple[str, str]]:
+        """
+        Extract entities using Claude Haiku for context-aware, high-quality
+        extraction of companies, roles, dates, technologies, etc.
+
+        Falls back to spaCy if the API is unavailable or the call fails.
+        Results are cached in-memory by SHA-256 of the text.
+        """
+        import hashlib, json, re as _re
+
+        cache_key = hashlib.sha256(text.encode()).hexdigest()
+        if cache_key in self._llm_entity_cache:
+            return self._llm_entity_cache[cache_key]
+
+        if self._anthropic_client is None:
+            result = self._extract_entities(text)
+            self._llm_entity_cache[cache_key] = result
+            return result
+
+        try:
+            prompt = self._LLM_PROMPT.format(text=text[:4000])
+            response = self._anthropic_client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+
+            # Robustly extract the full JSON array even if the model wraps it in text.
+            # Use greedy match from first '[' to last ']'.
+            json_match = _re.search(r'\[.*\]', raw, _re.DOTALL)
+            if not json_match:
+                raise ValueError(f"No JSON array found in LLM response: {raw[:200]}")
+
+            entities_raw = json.loads(json_match.group())
+            entities: List[Tuple[str, str]] = []
+            seen: set = set()
+            for item in entities_raw:
+                # Handle both {"name":..,"type":..} dicts AND plain strings
+                if isinstance(item, dict):
+                    name = str(item.get('name', '') or '').strip().strip('.,;:')
+                    etype = str(item.get('type', 'CONCEPT') or 'CONCEPT').strip().upper()
+                elif isinstance(item, str):
+                    name = item.strip().strip('.,;:')
+                    etype = 'CONCEPT'
+                else:
+                    continue
+                # Normalise name: strip domain suffixes
+                name = _re.sub(
+                    r'\.(com|net|org|io|co|ae|sa|jo|ca|uk|us|gov|edu)$', '', name, flags=_re.I
+                ).strip()
+                if not name or len(name) < 2 or len(name) > 120:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                entities.append((name, etype))
+
+            print(f"LLM extracted {len(entities)} entities from chunk "
+                  f"(first: {entities[:3]})")
+            self._llm_entity_cache[cache_key] = entities
+            return entities
+
+        except Exception as ex:
+            print(f"LLM entity extraction failed ({ex}); falling back to spaCy")
+            result = self._extract_entities(text)
+            self._llm_entity_cache[cache_key] = result
+            return result
+
+    # ── spaCy-based extraction (used for query-time, or as fallback) ──────────
+
     def _extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
         Extract named entities from text using spaCy.
-        
-        Args:
-            text: Text to extract entities from
-            
+        Used at query time (fast, no API call) and as an ingestion fallback.
+
         Returns:
             List of (entity_text, entity_type) tuples
         """
         try:
-            import re as _re2
-            # Limit text size to avoid processing extremely large chunks
+            import re as _re
+
             max_text_length = 10000
             if len(text) > max_text_length:
                 text = text[:max_text_length]
 
-            # Strip domain suffixes BEFORE running spaCy so that "Infoblox.com"
-            # becomes "Infoblox" and is recognised as an ORG entity.
-            text = _re2.sub(
+            # Strip domain suffixes before spaCy so "Infoblox.com" → "Infoblox"
+            text = _re.sub(
                 r'\b(\w{3,})\.(com|net|org|io|co|ae|sa|jo|ca|uk|us|gov|edu)\b',
-                r'\1', text, flags=_re2.I
+                r'\1', text, flags=_re.I
             )
 
             doc = nlp(text)
             entities = []
-            
-            # Regex to strip trailing domain suffixes so "Infoblox.com" → "Infoblox"
-            import re as _re
             _DOMAIN_SUFFIX = _re.compile(
                 r'\.(com|net|org|io|co|uk|gov|edu|ca|ae|sa|jo|us)$', _re.I
             )
 
-            # Extract named entities safely
             try:
                 for ent in doc.ents:
-                    # Filter out very short entities and common false positives
                     if len(ent.text) > 1 and ent.text.lower() not in ['the', 'a', 'an']:
-                        # Clean and normalize entity text; strip domain suffixes
                         entity_text = _DOMAIN_SUFFIX.sub('', ent.text.strip()).strip('.').title()
-                        # Limit entity length to avoid memory issues
-                        if len(entity_text) > 100:
-                            entity_text = entity_text[:100]
-                        if len(entity_text) > 1:
+                        if 1 < len(entity_text) <= 100:
                             entities.append((entity_text, ent.label_))
             except Exception as e:
-                print(f"Error extracting named entities: {str(e)}")
-            
-            # Add important noun phrases safely
+                print(f"Error extracting named entities: {e}")
+
             try:
                 for chunk in doc.noun_chunks:
-                    # Filter for substantial noun phrases
-                    if (len(chunk.text.split()) > 1 and 
-                        len(chunk.text) > 5 and 
-                        len(chunk.text) < 100 and
-                        not any(chunk.text.lower() == ent[0].lower() for ent in entities)):
+                    if (len(chunk.text.split()) > 1 and
+                            5 < len(chunk.text) < 100 and
+                            not any(chunk.text.lower() == ent[0].lower() for ent in entities)):
                         chunk_text = chunk.text.strip().title()
-                        # Limit chunk length
-                        if len(chunk_text) > 100:
-                            chunk_text = chunk_text[:100]
-                        entities.append((chunk_text, 'CONCEPT'))
+                        if len(chunk_text) <= 100:
+                            entities.append((chunk_text, 'CONCEPT'))
             except Exception as e:
-                print(f"Error extracting noun chunks: {str(e)}")
-            
-            # Limit total number of entities to prevent memory issues
-            max_entities = 100
-            if len(entities) > max_entities:
-                entities = entities[:max_entities]
-                
-            return entities
-            
+                print(f"Error extracting noun chunks: {e}")
+
+            return entities[:100]
+
         except Exception as e:
-            print(f"Error in entity extraction: {str(e)}")
-            return []  # Return empty list on error
+            print(f"Error in spaCy entity extraction: {e}")
+            return []
     
     def search(self, query: str, doc_id: str = None, limit: int = 10) -> Dict[str, Any]:
         """
