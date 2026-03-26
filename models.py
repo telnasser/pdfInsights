@@ -7,7 +7,7 @@ class Document(db.Model):
     """Document model for storing metadata about uploaded PDFs."""
     id = db.Column(db.String(64), primary_key=True)
     filename = db.Column(db.String(255), nullable=False)
-    title = db.Column(db.String(255), nullable=True)
+    title = db.Column(db.Text, nullable=True)
     upload_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     num_pages = db.Column(db.Integer, nullable=True)
     num_chunks = db.Column(db.Integer, nullable=True)
