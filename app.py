@@ -42,6 +42,81 @@ db.init_app(app)
 with app.app_context():
     db.create_all()
 
+def _rebuild_index_from_db():
+    """
+    Called once at startup (per worker).  If the persistent TF-IDF vectorizer
+    is missing on disk but DB chunks exist, re-generate embeddings from scratch
+    so that FAISS and the vectorizer are always in sync.
+    """
+    import os, logging, pickle
+    from rag.embeddings import _VECTORIZER_PATH, _PROJECTION_PATH
+
+    log = logging.getLogger(__name__)
+
+    vectorizer_missing = (
+        not os.path.exists(_VECTORIZER_PATH) or
+        not os.path.exists(_PROJECTION_PATH)
+    )
+    if not vectorizer_missing:
+        log.info("TF-IDF vectorizer found on disk — skipping re-index")
+        return
+
+    with app.app_context():
+        from sqlalchemy import text as sa_text
+        rows = db.session.execute(sa_text(
+            "SELECT id, document_id, chunk_index, text, page_num FROM chunk"
+        )).fetchall()
+
+        if not rows:
+            log.info("No chunks in DB — nothing to re-index")
+            return
+
+        log.info("Re-building TF-IDF vectorizer + FAISS index for %d chunks ...", len(rows))
+
+        try:
+            from rag.embeddings import EmbeddingGenerator
+            from rag.vector_store import VectorStore
+
+            emb_gen = EmbeddingGenerator()
+            texts = [r[3] for r in rows]
+
+            # Force-refit on all chunk texts → saves vectorizer + projection to disk
+            emb_gen._refit_and_save(texts)
+
+            # Generate embeddings using the newly saved vectorizer
+            embeddings = emb_gen._generate_local_embeddings(texts)
+
+            # Rebuild FAISS index: delete old index first
+            import shutil
+            index_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vector_db', 'faiss_index')
+            if os.path.exists(index_dir):
+                shutil.rmtree(index_dir)
+            os.makedirs(index_dir, exist_ok=True)
+
+            vector_store = VectorStore()
+
+            # Group by document_id
+            from collections import defaultdict
+            doc_chunks: dict = defaultdict(list)
+            for i, row in enumerate(rows):
+                doc_chunks[row[1]].append({
+                    'chunk_index': row[2],
+                    'text': row[3],
+                    'page_num': row[4],
+                    'document_id': row[1],
+                    'embedding': embeddings[i],
+                })
+
+            for doc_id_key, chunks in doc_chunks.items():
+                vector_store.add_document(doc_id_key, chunks)
+                log.info("Re-indexed %d chunks for doc %s", len(chunks), doc_id_key)
+
+            log.info("Re-index complete — %d total chunks indexed", len(rows))
+        except Exception as exc:
+            log.error("Re-index failed: %s", exc, exc_info=True)
+
+_rebuild_index_from_db()
+
 # Add datetime to all templates
 @app.context_processor
 def inject_now():
