@@ -98,7 +98,10 @@ class KeywordSearch:
             rows = db.session.execute(sql, params).fetchall()
 
             results = []
+            seen_keys = set()
             for row in rows:
+                key = (row.document_id, row.chunk_index)
+                seen_keys.add(key)
                 results.append({
                     "id": row.id,
                     "document_id": row.document_id,
@@ -115,11 +118,74 @@ class KeywordSearch:
                 "KeywordSearch: query='%s' tsquery='%s' doc_id=%s → %d results",
                 query[:60], or_query[:60], doc_id, len(results)
             )
-            return results
+
+            # ── Always augment with ILIKE for proper-noun terms ──────────────
+            # FTS can miss terms like "Infoblox.com" (stored as URL token in
+            # tsvector) even though ILIKE '%infoblox%' finds them just fine.
+            # Extract capitalised / proper-noun tokens and always run ILIKE for them.
+            import re as _re
+            proper_nouns = [
+                t for t in sig_terms
+                if t and t[0].isupper() and len(t) >= 4
+                and not t.lower() in ('what', 'where', 'when', 'which', 'who', 'how',
+                                      'does', 'did', 'has', 'have', 'been', 'were')
+            ]
+            if proper_nouns:
+                ilike_results = self._ilike_for_terms(proper_nouns, doc_id, top_k,
+                                                      seen_keys, score=0.4)
+                results.extend(ilike_results)
+
+            return results[:top_k]
 
         except Exception as exc:
             logger.error("KeywordSearch FTS error: %s — falling back to ILIKE", exc)
             return self._ilike_fallback(query, doc_id, top_k)
+
+    def _ilike_for_terms(
+        self,
+        terms: List[str],
+        doc_id: Optional[str],
+        top_k: int,
+        seen_keys: set,
+        score: float = 0.4,
+    ) -> List[Dict[str, Any]]:
+        """
+        ILIKE search for specific terms.  Only returns rows NOT already in
+        *seen_keys* so we never duplicate a chunk already found via FTS.
+        """
+        try:
+            from app import db
+            from sqlalchemy import or_
+            from models import Chunk
+
+            filters = [Chunk.text.ilike(f'%{t}%') for t in terms[:10]]
+            q = Chunk.query.filter(or_(*filters))
+            if doc_id:
+                q = q.filter(Chunk.document_id == doc_id)
+            rows = q.limit(top_k).all()
+
+            results = []
+            for c in rows:
+                key = (c.document_id, c.chunk_index)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                results.append({
+                    "id": c.id,
+                    "document_id": c.document_id,
+                    "chunk_index": c.chunk_index,
+                    "text": c.text,
+                    "page_num": c.page_num,
+                    "score": score,
+                    "search_type": "keyword",
+                })
+            if results:
+                logger.info("KeywordSearch ILIKE augment: +%d results for %s",
+                            len(results), terms[:3])
+            return results
+        except Exception as exc:
+            logger.error("KeywordSearch._ilike_for_terms error: %s", exc)
+            return []
 
     def _ilike_fallback(
         self,
@@ -135,27 +201,7 @@ class KeywordSearch:
             if not sig_terms:
                 return []
 
-            from sqlalchemy import or_
-            from models import Chunk
-            filters = [Chunk.text.ilike(f'%{t}%') for t in sig_terms[:10]]
-            q = Chunk.query.filter(or_(*filters))
-            if doc_id:
-                q = q.filter(Chunk.document_id == doc_id)
-            rows = q.limit(top_k).all()
-
-            results = []
-            for c in rows:
-                results.append({
-                    "id": c.id,
-                    "document_id": c.document_id,
-                    "chunk_index": c.chunk_index,
-                    "text": c.text,
-                    "page_num": c.page_num,
-                    "score": 0.3,
-                    "search_type": "keyword",
-                })
-            logger.info("KeywordSearch ILIKE fallback: %d results", len(results))
-            return results
+            return self._ilike_for_terms(sig_terms, doc_id, top_k, set(), score=0.3)
         except Exception as exc2:
             logger.error("KeywordSearch ILIKE fallback error: %s", exc2)
             return []
