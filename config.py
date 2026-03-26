@@ -14,7 +14,7 @@ VECTOR_DB_TYPE = 'faiss'  # Only 'faiss' is supported
 
 # Embedding configuration
 EMBEDDING_DIMENSION = 768  # Use 768 to match existing index dimensions
-CLAUDE_EMBEDDING_MODEL = "claude-3-5-sonnet-20241022"  # Valid Claude embedding model
+CLAUDE_EMBEDDING_MODEL = "claude-3-haiku-20240307"  # Widely available Claude model
 EMBEDDING_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 # When rebuilding the index, ensure the index dimension matches the embedding dimension
@@ -27,8 +27,7 @@ RERANKING_ENABLED = True
 USE_COSINE_SIMILARITY = True  # Prefer cosine similarity over just topK
 
 # LLM configuration
-CLAUDE_LLM_MODEL = "claude-3-5-sonnet-20241022"  # Valid Claude model
-# the newest Anthropic model is "claude-3-5-sonnet-20241022" which was released October 22, 2024
+CLAUDE_LLM_MODEL = "claude-3-haiku-20240307"  # Widely available Claude model
 LLM_API_KEY = EMBEDDING_API_KEY  # Use the same API key for both embedding and LLM
 
 # Claude API configuration
