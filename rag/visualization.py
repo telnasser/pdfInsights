@@ -11,8 +11,7 @@ class Visualizer:
     
     def __init__(self):
         """Initialize the visualizer."""
-        self.pca = PCA(n_components=50)  # For initial dimensionality reduction
-        self.tsne = TSNE(n_components=2, random_state=42)  # For 2D projection
+        pass
         
     def create_chunk_visualization(self, doc_id: str, vector_store) -> Dict[str, Any]:
         """
@@ -25,61 +24,36 @@ class Visualizer:
         Returns:
             Dictionary with visualization data
         """
-        # Get document chunks from vector store
+        # Get document chunks from vector store (metadata only – no embeddings stored)
         chunks = vector_store.get_document_chunks(doc_id)
         
         if not chunks:
             return {'error': 'No chunks found for document'}
         
-        # Extract embeddings
-        embeddings = [chunk['embedding'] for chunk in chunks if 'embedding' in chunk]
-        
-        if not embeddings:
-            return {'error': 'No embeddings found in chunks'}
-        
-        # Convert to numpy array
-        embeddings_array = np.array(embeddings)
-        
-        # Reduce dimensionality
-        try:
-            if embeddings_array.shape[1] > 50:
-                # First reduce with PCA to 50 dimensions
-                reduced_embeddings = self.pca.fit_transform(embeddings_array)
-            else:
-                reduced_embeddings = embeddings_array
-                
-            # Then use t-SNE for 2D visualization
-            projections = self.tsne.fit_transform(reduced_embeddings)
-            
-            # Calculate similarities between chunks
-            similarities = self._calculate_chunk_similarities(embeddings_array)
-            
-            # Create projection data
-            projection_data = []
-            for i, (x, y) in enumerate(projections):
-                projection_data.append({
-                    'x': float(x),
-                    'y': float(y),
-                    'chunk': self._prepare_chunk_for_json(chunks[i])
-                })
-                
-            # Create similarity data (connections between chunks)
-            similarity_data = []
-            for i, j, score in similarities:
-                if score > 0.7:  # Only include strong connections
-                    similarity_data.append({
-                        'source': i,
-                        'target': j,
-                        'score': float(score)
-                    })
-                    
-            return {
-                'projections': projection_data,
-                'similarities': similarity_data
-            }
-            
-        except Exception as e:
-            return {'error': str(e)}
+        # Embeddings are not persisted in metadata; build lightweight positional layout
+        n = len(chunks)
+
+        # Simple positional layout arranged in a grid
+        cols = max(1, int(n ** 0.5))
+        projection_data = []
+        for i, chunk in enumerate(chunks):
+            row = i // cols
+            col = i % cols
+            projection_data.append({
+                'x': float(col * 10),
+                'y': float(row * 10),
+                'chunk': self._prepare_chunk_for_json(chunk)
+            })
+
+        # Build sequential similarity links (each chunk connected to the next)
+        similarity_data = []
+        for i in range(n - 1):
+            similarity_data.append({'source': i, 'target': i + 1, 'score': 0.8})
+
+        return {
+            'projections': projection_data,
+            'similarities': similarity_data
+        }
             
     def _calculate_chunk_similarities(self, embeddings: np.ndarray) -> List[tuple]:
         """
