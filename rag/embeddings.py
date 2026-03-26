@@ -1,5 +1,6 @@
 import os
 import logging
+import pickle
 from typing import List, Dict, Any, Union, Optional
 
 import numpy as np
@@ -10,6 +11,37 @@ import anthropic
 from config import EMBEDDING_DIMENSION, EMBEDDING_API_KEY, CLAUDE_EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
+
+_VECTORIZER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vector_db', 'tfidf_vectorizer.pkl')
+_PROJECTION_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vector_db', 'tfidf_projection.pkl')
+
+
+def _save_vectorizer(vectorizer, projection):
+    """Persist the fitted TF-IDF vectorizer and projection matrix to disk."""
+    try:
+        os.makedirs(os.path.dirname(_VECTORIZER_PATH), exist_ok=True)
+        with open(_VECTORIZER_PATH, 'wb') as f:
+            pickle.dump(vectorizer, f)
+        with open(_PROJECTION_PATH, 'wb') as f:
+            pickle.dump(projection, f)
+        logger.info("Saved TF-IDF vectorizer (vocab=%d) to disk", len(vectorizer.vocabulary_))
+    except Exception as e:
+        logger.error("Failed to save vectorizer: %s", e)
+
+
+def _load_vectorizer():
+    """Load the TF-IDF vectorizer and projection matrix from disk, or return (None, None)."""
+    try:
+        if os.path.exists(_VECTORIZER_PATH) and os.path.exists(_PROJECTION_PATH):
+            with open(_VECTORIZER_PATH, 'rb') as f:
+                vectorizer = pickle.load(f)
+            with open(_PROJECTION_PATH, 'rb') as f:
+                projection = pickle.load(f)
+            logger.info("Loaded TF-IDF vectorizer (vocab=%d) from disk", len(vectorizer.vocabulary_))
+            return vectorizer, projection
+    except Exception as e:
+        logger.error("Failed to load vectorizer from disk: %s", e)
+    return None, None
 
 class EmbeddingGenerator:
     """
@@ -31,6 +63,7 @@ class EmbeddingGenerator:
         self.api_key = os.environ.get('ANTHROPIC_API_KEY')
         self.use_fallback = False
         self.tfidf_vectorizer = None
+        self._projection = None  # shared random-projection matrix (seed=42)
         self.client = None
         
         # Test API key and prepare fallback
@@ -208,12 +241,12 @@ class EmbeddingGenerator:
                 return all_embeddings
             elif len(all_embeddings) > 0:
                 logger.warning(f"Partial success: generated {len(all_embeddings)} embeddings out of {len(texts)}")
-                # Pad with zeros for missing embeddings
                 while len(all_embeddings) < len(texts):
                     all_embeddings.append([0.0] * self.embedding_dimension)
                 return all_embeddings
             else:
-                logger.error("Failed to generate any embeddings via API")
+                logger.error("Failed to generate any embeddings via API — switching to local TF-IDF permanently")
+                self.use_fallback = True
                 return self._generate_local_embeddings(texts)
                 
         except Exception as e:
@@ -231,166 +264,133 @@ class EmbeddingGenerator:
             
         return self._generate_local_embeddings(texts)
         
+    def _ensure_vectorizer(self, fit_texts: List[str] = None, force_refit: bool = False):
+        """
+        Ensure self.tfidf_vectorizer and self._projection are ready.
+
+        Priority:
+          1. Already in memory and not forced refit → use as-is.
+          2. force_refit=True → refit on fit_texts, save to disk.
+          3. Not in memory → try loading from disk.
+          4. Nothing on disk → fit on fit_texts (or empty corpus), save.
+        """
+        from config import EMBEDDING_DIMENSION
+        self.embedding_dimension = EMBEDDING_DIMENSION
+
+        if self.tfidf_vectorizer is not None and self._projection is not None and not force_refit:
+            return
+
+        if force_refit and fit_texts:
+            self._refit_and_save(fit_texts)
+            return
+
+        # Try loading from disk first
+        vectorizer, projection = _load_vectorizer()
+        if vectorizer is not None and projection is not None:
+            self.tfidf_vectorizer = vectorizer
+            self._projection = projection
+            return
+
+        # Nothing on disk — fit from scratch using provided texts
+        if fit_texts:
+            self._refit_and_save(fit_texts)
+        else:
+            logger.warning("No texts and no saved vectorizer — creating minimal fallback vectorizer")
+            self._refit_and_save([
+                "document text placeholder for initialization purposes only"
+            ])
+
+    def _refit_and_save(self, texts: List[str]):
+        """Fit vectorizer on texts + load all DB chunks, then save to disk."""
+        from config import EMBEDDING_DIMENSION
+        self.embedding_dimension = EMBEDDING_DIMENSION
+
+        # Pull all existing chunks from DB to ensure vocabulary covers everything
+        corpus = list(texts)
+        try:
+            from app import db
+            from sqlalchemy import text as sa_text
+            rows = db.session.execute(sa_text("SELECT text FROM chunk")).fetchall()
+            for row in rows:
+                if row[0]:
+                    corpus.append(row[0])
+        except Exception as e:
+            logger.warning("Could not load existing chunks for vectorizer refit: %s", e)
+
+        max_features = 10000
+        vectorizer = TfidfVectorizer(
+            ngram_range=(1, 2),
+            max_features=max_features,
+            stop_words='english',
+        )
+        vectorizer.fit(corpus)
+        vocab_size = len(vectorizer.vocabulary_)
+        logger.info("Fitted TF-IDF vectorizer on %d texts, vocab=%d", len(corpus), vocab_size)
+
+        # Build the random projection matrix with fixed seed so it's deterministic
+        np.random.seed(42)
+        projection = np.random.randn(vocab_size, self.embedding_dimension).astype(np.float32)
+        projection /= np.sqrt(vocab_size)
+
+        self.tfidf_vectorizer = vectorizer
+        self._projection = projection
+        _save_vectorizer(vectorizer, projection)
+
     def _generate_local_embeddings(self, texts: List[str]) -> List[np.ndarray]:
         """Generate embeddings using TF-IDF vectorizer with dense projection."""
         try:
-            # Handle empty list
             if not texts:
-                print("Warning: Empty texts list for embedding generation")
+                logger.warning("Empty texts list for embedding generation")
                 return []
-            
-            # Make sure we have a valid embedding dimension
+
             from config import EMBEDDING_DIMENSION
             self.embedding_dimension = EMBEDDING_DIMENSION
-            print(f"Using embedding dimension: {self.embedding_dimension}")
-                
-            # Create a new vectorizer if none exists
-            if self.tfidf_vectorizer is None:
-                # Use much larger feature set to better capture meaning
-                max_features = 10000
-                print(f"Initializing TF-IDF vectorizer with max_features={max_features}")
-                try:
-                    # Initialize the TF-IDF vectorizer
-                    self.tfidf_vectorizer = TfidfVectorizer(
-                        ngram_range=(1, 2),
-                        max_features=max_features,  # Get more features for better semantic matching
-                        stop_words='english'
-                    )
-                    
-                    # Initialize with sample texts plus current texts
-                    sample_texts = [
-                        "This is a sample text to initialize the TF-IDF vectorizer.",
-                        "Multiple examples help ensure we get consistent vocabulary size.",
-                        "The vectorizer needs enough examples to build a meaningful vocabulary.",
-                        "With these samples, we ensure consistent embedding dimensions for queries and documents.",
-                        # Add financial/business domain texts
-                        "Annual financial report with revenue growth and profit margins for Amazon.",
-                        "Company performance metrics including quarterly earnings and market share of AWS.",
-                        "Business strategy focusing on expansion, acquisition and market penetration.",
-                        "Economic factors affecting business operations and profitability goals.",
-                        "Technical analysis of product development lifecycle and innovation roadmap.",
-                        "Growth metrics and yearly performance data across multiple business segments.",
-                        "Market trends and competitive analysis for e-commerce and cloud computing.",
-                        "Analysis of year-over-year growth and financial performance indicators."
-                    ]
-                    
-                    # Combine sample texts with actual texts for better vocabulary
-                    all_texts = sample_texts + texts
-                    
-                    # Fit on combined texts
-                    self.tfidf_vectorizer.fit(all_texts)
-                    
-                    print(f"Initialized TF-IDF vectorizer with max_features={max_features}, vocabulary size: {len(self.tfidf_vectorizer.vocabulary_)}")
-                    
-                except Exception as init_error:
-                    print(f"Failed to initialize vectorizer: {str(init_error)}")
-                    # Return random embeddings as last resort, properly serializable
-                    return [[float(x) for x in (np.random.randn(self.embedding_dimension))] for _ in texts]
-            
-            # Transform texts to embeddings using existing vocabulary
+
+            # Ensure vectorizer is ready.
+            # When called with many texts it's a document batch → force refit so
+            # the vocabulary is always built from the full corpus.
+            # When called with a single text it's a query → load from disk.
+            self._ensure_vectorizer(fit_texts=texts, force_refit=len(texts) > 1)
+
+            # Project texts into embedding space
             try:
-                embeddings = self.tfidf_vectorizer.transform(texts)
-                print(f"Generated sparse embeddings with shape: {embeddings.shape}")
-            except Exception as transform_error:
-                print(f"Error transforming with existing vocabulary: {str(transform_error)}")
-                # If transformation fails, try recreating the vectorizer
-                print("Recreating vectorizer with these texts...")
-                try:
-                    max_features = 10000
-                    self.tfidf_vectorizer = TfidfVectorizer(
-                        ngram_range=(1, 2),
-                        max_features=max_features,
-                        stop_words='english'
-                    )
-                    self.tfidf_vectorizer.fit(texts)
-                    embeddings = self.tfidf_vectorizer.transform(texts)
-                    print(f"Recreated vectorizer with {len(self.tfidf_vectorizer.vocabulary_)} terms")
-                except Exception as refit_error:
-                    print(f"Error after recreating vectorizer: {str(refit_error)}")
-                    return [[float(x) for x in (np.random.randn(self.embedding_dimension))] for _ in texts]
-            
-            # Normalize and convert to dense
-            try:
-                # Convert sparse to dense
-                dense_embeddings = embeddings.toarray()
-                print(f"Converted to dense with shape: {dense_embeddings.shape}")
-                
-                # If we have more features than our target dimension, use random projection
-                if dense_embeddings.shape[1] > self.embedding_dimension:
-                    print(f"Projecting from {dense_embeddings.shape[1]} to {self.embedding_dimension} dimensions")
-                    
-                    # Create a random projection matrix
-                    np.random.seed(42)  # For reproducibility
-                    projection = np.random.randn(dense_embeddings.shape[1], self.embedding_dimension).astype(np.float32)
-                    # Normalize columns to preserve distances approximately
-                    projection = projection / np.sqrt(projection.shape[0])
-                    
-                    # Project to lower dimension
-                    projected = np.dot(dense_embeddings, projection)
-                    print(f"Projected to shape: {projected.shape}")
-                    
-                    # Normalize vectors
-                    norms = np.linalg.norm(projected, axis=1, keepdims=True)
-                    # Avoid division by zero
-                    norms = np.maximum(norms, 1e-10)
-                    normalized = projected / norms
-                    
-                    # Convert to list
-                    result = [normalized[i] for i in range(normalized.shape[0])]
-                    
-                # If we have fewer features, pad to the target dimension
-                elif dense_embeddings.shape[1] < self.embedding_dimension:
-                    print(f"Padding from {dense_embeddings.shape[1]} to {self.embedding_dimension} dimensions")
-                    result = []
-                    for i in range(dense_embeddings.shape[0]):
-                        # Create padded vector
-                        padded = np.zeros(self.embedding_dimension, dtype=np.float32)
-                        # Copy existing values
-                        padded[:dense_embeddings.shape[1]] = dense_embeddings[i]
-                        
-                        # Add small random noise to padding to make vectors more discriminative
-                        if dense_embeddings.shape[1] < self.embedding_dimension:
-                            noise = np.random.randn(self.embedding_dimension - dense_embeddings.shape[1]).astype(np.float32) * 0.01
-                            padded[dense_embeddings.shape[1]:] = noise
-                        
-                        # Normalize
-                        padded = padded / (np.linalg.norm(padded) + 1e-10)
-                        result.append(padded)
-                else:
-                    # Already the right dimension
-                    # Normalize vectors
-                    norms = np.linalg.norm(dense_embeddings, axis=1, keepdims=True)
-                    # Avoid division by zero
-                    norms = np.maximum(norms, 1e-10)
-                    normalized = dense_embeddings / norms
-                    result = [normalized[i] for i in range(normalized.shape[0])]
-                
-                print(f"Returning {len(result)} embeddings with dimension {result[0].shape if result else 'n/a'}")
-                
-                # Make sure values are all finite and convert to regular Python floats
-                # to ensure JSON serialization works
-                serializable_result = []
-                for i in range(len(result)):
-                    # First replace any NaN or infinity values
-                    cleaned = np.nan_to_num(result[i])
-                    # Convert to regular Python float list for JSON serialization
-                    serializable_result.append([float(x) for x in cleaned])
-                
-                print(f"Returning serializable embeddings of type: {type(serializable_result[0][0]) if serializable_result else 'n/a'}")
-                return serializable_result
-                
-            except Exception as normalize_error:
-                print(f"Error during normalization: {str(normalize_error)}")
-                # Create random vectors and convert to regular Python floats for serialization
-                return [[float(x) for x in (np.random.randn(self.embedding_dimension) / np.sqrt(self.embedding_dimension))] for _ in texts]
-            
+                sparse = self.tfidf_vectorizer.transform(texts)
+            except Exception as e:
+                logger.error("TF-IDF transform failed (%s); refitting on current texts", e)
+                self._refit_and_save(texts)
+                sparse = self.tfidf_vectorizer.transform(texts)
+
+            dense = sparse.toarray().astype(np.float32)   # (N, vocab)
+
+            vocab_size = dense.shape[1]
+            proj = self._projection
+
+            # Rebuild projection if shape doesn't match (e.g. vocab changed after refit)
+            if proj is None or proj.shape[0] != vocab_size or proj.shape[1] != self.embedding_dimension:
+                np.random.seed(42)
+                proj = np.random.randn(vocab_size, self.embedding_dimension).astype(np.float32)
+                proj /= np.sqrt(vocab_size)
+                self._projection = proj
+                # Persist updated projection
+                _save_vectorizer(self.tfidf_vectorizer, proj)
+
+            projected = dense @ proj                        # (N, 768)
+            norms = np.linalg.norm(projected, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-10)
+            normalized = projected / norms                  # (N, 768) unit vectors
+
+            result = []
+            for i in range(normalized.shape[0]):
+                cleaned = np.nan_to_num(normalized[i])
+                result.append([float(x) for x in cleaned])
+
+            logger.info("Generated %d local embeddings (vocab=%d → dim=%d)",
+                        len(result), vocab_size, self.embedding_dimension)
+            return result
+
         except Exception as e:
-            print(f"Error generating local embeddings: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            # Return zero embeddings as last resort, converted to serializable format
+            logger.error("Error generating local embeddings: %s", e, exc_info=True)
             zeros = [[0.0] * self.embedding_dimension for _ in texts]
-            print(f"Falling back to {len(zeros)} zero embeddings with dimension {len(zeros[0]) if zeros else 'n/a'}")
             return zeros
             
     def embed_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
