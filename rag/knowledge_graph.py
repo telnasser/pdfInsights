@@ -529,25 +529,48 @@ JSON array:"""
         return output_path
     
     def _get_top_entities(self, doc_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get top entities for a document by occurrence count."""
-        doc_entities = self.document_entities.get(doc_id, set())
-        
-        # Sort entities by count
-        sorted_entities = sorted(doc_entities, 
-                                key=lambda e: self.entity_counts.get(e, 0), 
-                                reverse=True)
-        
-        top_entities = []
-        for entity in sorted_entities[:limit]:
-            if entity in self.graph:
-                entity_type = self.graph.nodes[entity].get('type', 'UNKNOWN')
-                top_entities.append({
-                    'entity': entity,
-                    'count': self.entity_counts.get(entity, 0),
-                    'type': entity_type
-                })
-        
-        return top_entities
+        """
+        Get top entities for a document by how many chunks they appear in.
+        Reads directly from PostgreSQL so it always reflects persisted data.
+        Falls back to the in-memory graph if the DB is not available.
+        """
+        try:
+            from app import db
+            from sqlalchemy import text as _sa_text
+
+            rows = db.session.execute(_sa_text("""
+                SELECT name, entity_type, chunk_indices
+                FROM graph_entity
+                WHERE doc_ids::text LIKE :pat
+                ORDER BY json_array_length(chunk_indices::json) DESC
+                LIMIT :lim
+            """), {"pat": f"%{doc_id}%", "lim": limit}).fetchall()
+
+            return [
+                {
+                    "entity": r.name,
+                    "type": r.entity_type,
+                    "count": len(r.chunk_indices) if r.chunk_indices else 0,
+                }
+                for r in rows
+            ]
+        except Exception as ex:
+            print(f"_get_top_entities DB fallback: {ex}")
+            # fallback: in-memory
+            doc_entities = self.document_entities.get(doc_id, set())
+            sorted_entities = sorted(doc_entities,
+                                     key=lambda e: self.entity_counts.get(e, 0),
+                                     reverse=True)
+            top_entities = []
+            for entity in sorted_entities[:limit]:
+                if entity in self.graph:
+                    entity_type = self.graph.nodes[entity].get('type', 'UNKNOWN')
+                    top_entities.append({
+                        'entity': entity,
+                        'count': self.entity_counts.get(entity, 0),
+                        'type': entity_type,
+                    })
+            return top_entities
     
     def _remove_document_entities(self, doc_id: str):
         """Remove entities and relationships associated with a document."""
@@ -752,19 +775,60 @@ JSON array:"""
         return query
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about the knowledge graph."""
-        entity_types = defaultdict(int)
-        for node, attrs in self.graph.nodes(data=True):
-            entity_type = attrs.get('type', 'UNKNOWN')
-            entity_types[entity_type] += 1
-        document_coverage = len(self.document_entities)
-        sorted_types = sorted(entity_types.items(), key=lambda x: x[1], reverse=True)
-        return {
-            'node_count': len(self.graph.nodes),
-            'edge_count': len(self.graph.edges),
-            'document_count': document_coverage,
-            'entity_types': dict(sorted_types)
-        }
+        """
+        Get statistics about the knowledge graph.
+        Reads directly from PostgreSQL so the numbers always match the stored data.
+        Falls back to the in-memory NetworkX graph if the DB is unavailable.
+        """
+        try:
+            from app import db
+            from sqlalchemy import text as _sa_text
+
+            node_count = db.session.execute(
+                _sa_text("SELECT COUNT(*) FROM graph_entity")
+            ).scalar() or 0
+
+            edge_count = db.session.execute(
+                _sa_text("SELECT COUNT(*) FROM graph_relationship")
+            ).scalar() or 0
+
+            # Count distinct documents by counting distinct doc_id values
+            # stored in the document table that have at least one entity
+            doc_count = db.session.execute(
+                _sa_text(
+                    "SELECT COUNT(DISTINCT d.id) FROM document d "
+                    "JOIN graph_entity ge ON ge.doc_ids::text LIKE '%' || d.id || '%'"
+                )
+            ).scalar() or 0
+
+            # Entity type breakdown
+            type_rows = db.session.execute(_sa_text("""
+                SELECT entity_type, COUNT(*) AS cnt
+                FROM graph_entity
+                GROUP BY entity_type
+                ORDER BY cnt DESC
+            """)).fetchall()
+            entity_types = {r.entity_type: r.cnt for r in type_rows}
+
+            return {
+                'node_count': node_count,
+                'edge_count': edge_count,
+                'document_count': doc_count,
+                'entity_types': entity_types,
+            }
+        except Exception as ex:
+            print(f"get_stats DB fallback: {ex}")
+            # fallback: in-memory NetworkX graph
+            entity_types = defaultdict(int)
+            for node, attrs in self.graph.nodes(data=True):
+                entity_types[attrs.get('type', 'UNKNOWN')] += 1
+            sorted_types = sorted(entity_types.items(), key=lambda x: x[1], reverse=True)
+            return {
+                'node_count': len(self.graph.nodes),
+                'edge_count': len(self.graph.edges),
+                'document_count': len(self.document_entities),
+                'entity_types': dict(sorted_types),
+            }
 
     # ------------------------------------------------------------------
     # Multi-hop graph traversal
