@@ -43,9 +43,9 @@ class TextChunker:
         if not text:
             return []
             
-        # Clean text: normalize whitespace and remove excessive newlines
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        # Clean text: only normalize horizontal whitespace, preserve line structure
+        text = re.sub(r'[ \t]+', ' ', text)       # collapse spaces/tabs only
+        text = re.sub(r'\n{3,}', '\n\n', text)    # cap consecutive blank lines at 2
         
         # Choose chunking strategy
         if strategy == "sentence":
@@ -144,14 +144,12 @@ class TextChunker:
             if current_length + paragraph_len > chunk_size and current_chunk:
                 chunks.append("\n\n".join(current_chunk))
                 
-                # For paragraph overlap, we either take the last paragraph or none
-                # since paragraphs should typically be semantic units
+                # For paragraph overlap, carry the last paragraph forward if it fits
+                last_paragraph = current_chunk[-1]  # read BEFORE clearing
                 current_chunk = []
                 current_length = 0
                 
-                # Only add overlap if the last paragraph is smaller than the overlap size
-                last_paragraph = current_chunk[-1] if current_chunk else ""
-                if len(last_paragraph) <= chunk_overlap:
+                if last_paragraph and len(last_paragraph) <= chunk_overlap:
                     current_chunk = [last_paragraph]
                     current_length = len(last_paragraph)
             
