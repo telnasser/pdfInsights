@@ -306,8 +306,8 @@ class KnowledgeGraph:
         Returns:
             Path to the generated HTML visualization
         """
-        # Create a new pyvis network
-        net = Network(height='600px', width='100%', notebook=False)
+        # Create a new pyvis network (cdn_resources='remote' avoids broken local lib paths)
+        net = Network(height='600px', width='100%', notebook=False, cdn_resources='remote')
         
         # If query is provided, get subgraph based on query
         if query:
@@ -413,7 +413,9 @@ class KnowledgeGraph:
         """)
         
         # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        dir_name = os.path.dirname(output_path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         
         # Save visualization
         net.save_graph(output_path)
@@ -937,33 +939,36 @@ class KnowledgeGraph:
 
             # Extract seed entity names from query
             raw_entities = self._extract_entities(query)
-            seed_names = [e[0].title() for e, _ in [
-                (pair, None) for pair in raw_entities
-            ]]
-            # Fix: raw_entities is [(name, type), ...]
-            seed_names = [pair[0].title() for pair in raw_entities]
+            exact_names = [pair[0].title() for pair in raw_entities]
 
-            # Keyword fallback
-            if not seed_names:
-                keywords = [
-                    tok.text.lower()
-                    for tok in nlp(query)
-                    if tok.pos_ in ('NOUN', 'PROPN') and len(tok.text) > 3
-                ]
-                if keywords:
-                    like_filter = GraphEntity.name.ilike(f'%{keywords[0]}%')
-                    for kw in keywords[1:]:
-                        from sqlalchemy import or_
-                        like_filter = or_(like_filter, GraphEntity.name.ilike(f'%{kw}%'))
-                    seed_entities = GraphEntity.query.filter(like_filter).limit(5).all()
-                    seed_names = [e.name for e in seed_entities]
+            # Also pull significant nouns/proper-nouns from the query as keywords
+            kw_tokens = [
+                tok.text.lower()
+                for tok in nlp(query)
+                if tok.pos_ in ('NOUN', 'PROPN') and len(tok.text) > 2
+                and tok.text.lower() not in ('did', 'does', 'has', 'was', 'were',
+                                              'have', 'been', 'being', 'where',
+                                              'when', 'what', 'who', 'how')
+            ]
 
-            if not seed_names:
+            from sqlalchemy import or_
+
+            # Resolve seed entity IDs via ILIKE fuzzy matching on ALL candidate names
+            candidates = list(set(exact_names + kw_tokens))
+            seed_entities_db: List = []
+            if candidates:
+                ilike_filter = GraphEntity.name.ilike(f'%{candidates[0]}%')
+                for cand in candidates[1:]:
+                    ilike_filter = or_(ilike_filter, GraphEntity.name.ilike(f'%{cand}%'))
+                seed_entities_db = GraphEntity.query.filter(ilike_filter).limit(10).all()
+
+            if not seed_entities_db:
                 return {'query_entities': [], 'all_entities': [],
                         'chunk_indices': [], 'hop_summary': []}
 
+            seed_names = [e.name for e in seed_entities_db]
+
             # BFS using DB
-            from sqlalchemy import or_
             visited_ids: Set[int] = set()
             frontier_names = set(seed_names)
             all_chunk_indices: List[int] = []
